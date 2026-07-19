@@ -6,13 +6,15 @@ GARB_CONFIG_LOCATION="config.sh"
 #GARB_BYPASS_SYSTEMCHECK=1
 
 # Defaults
-DEFAULT_BOOTEND=1048576
+DEFAULT_BOOTEND=1048576 # ~1GB
 DEFAULT_FILESYSTEM="xfs"
 DEFAULT_CHECKSITE="gentoo.org"
 DEFAULT_NAMESERVER="1.1.1.1"
 DEFAULT_MOUNT="/mnt/gentoo"
 DEFAULT_PROFILE="desktop-openrc"
 DEFAULT_BOOTLOADER="grub"
+DEFAULT_HOSTNAME="gentoo"
+DEFAULT_KERNEL="gentoo-kernel-bin"
 DEFAULT_LOCALE="$(locale | grep LANG | awk -F= '{print $2}') UTF-8"
 
 # Variables
@@ -256,7 +258,7 @@ chroot_work() {
     source /etc/profile
     source /config.sh
     emerge-webrsync
-    emerge --ask --oneshot app-portage/cpuid2cpuflags
+    emerge --oneshot app-portage/cpuid2cpuflags
     echo "*/* $(cpuid2cpuflags)" > /etc/portage/package.use/00cpu-flags
 
     if [[ -f "/usr/share/zoneinfo" ]]; then
@@ -280,6 +282,45 @@ chroot_work() {
     echo "sys-kernel/installkernel grub dracut" >> /etc/portage/package.use/installkernel
 
     emerge sys-kernel/installkernel
+    emerge sys-kernel/"$CONFIG_KERNEL"
+
+    {
+        ROOT_SRC=$(findmnt -no SOURCE /)
+        ROOT_FSTYPE=$(findmnt -no FSTYPE /)
+        echo "UUID=$(blkid -s UUID -o value "$ROOT_SRC") / $ROOT_FSTYPE noatime 0 1"
+
+        if [[ $CONFIG_UEFI -eq 1 ]]; then
+            EFI_SRC=$(findmnt -no SOURCE /efi)
+            echo "UUID=$(blkid -s UUID -o value "$EFI_SRC") /efi vfat noatime 0 2"
+        else
+            BOOT_SRC=$(findmnt -no SOURCE /boot)
+            BOOT_FSTYPE=$(findmnt -no FSTYPE /boot)
+            echo "UUID=$(blkid -s UUID -o value "$BOOT_SRC") /boot $BOOT_FSTYPE noatime 0 2"
+        fi
+
+        SWAP_SRC=$(swapon --noheadings --show=NAME | head -n1)
+        echo "UUID=$(blkid -s UUID -o value "$SWAP_SRC") none swap sw 0 0"
+    } > /etc/fstab
+
+    emerge sys-boot/grub
+
+    if [[ $CONFIG_UEFI -eq 1 ]]; then
+        grub-install --target=x86_64-efi --efi-directory=/efi
+    else
+        grub-install "/dev/$CONFIG_DISK"
+    fi
+
+    grub-mkconfig -o /boot/grub/grub.cfg
+
+    echo "$CONFIG_HOSTNAME" > /etc/hostname
+    echo "hostname=\"$CONFIG_HOSTNAME\"" > /etc/conf.d/hostname
+
+    echo "root:$CONFIG_ROOTPASS" | chpasswd
+    useradd -m -G wheel,users -s /bin/bash "$CONFIG_USERNAME"
+    echo "$CONFIG_USERNAME:$CONFIG_PASSWORD" | chpasswd
+
+    emerge app-admin/sudo
+    sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 }
 
 enable_chroot() {
@@ -336,6 +377,8 @@ load_config() {
 
     checks CONFIG_PROFILE $DEFAULT_PROFILE
     checks CONFIG_ARCH "amd64"
+    checks CONFIG_HOSTNAME $DEFAULT_HOSTNAME
+    checks CONFIG_KERNEL $DEFAULT_KERNEL
 }
 
 system_checks() {
