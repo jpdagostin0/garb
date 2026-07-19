@@ -4,6 +4,7 @@ GARB_VERSION="1.0"
 GARB_CONFIG_VERSION="1"
 GARB_CONFIG_LOCATION="config.sh"
 #GARB_BYPASS_SYSTEMCHECK=1
+
 # Defaults
 DEFAULT_BOOTEND=1048576 # ~1GB
 DEFAULT_FILESYSTEM="xfs"
@@ -172,12 +173,14 @@ mount_disks() {
     swapon "$2"
 
     if [[ $CONFIG_UEFI -eq 1 ]]; then
-        mkdir -p "$CONFIG_MOUNT/efi"
+        mkdir -p "$CONFIG_MOUNT"
         mount "$3" "$CONFIG_MOUNT"
+        mkdir -p "$CONFIG_MOUNT/efi"
         mount "$1" "$CONFIG_MOUNT/efi"
     else
-        mkdir -p "$CONFIG_MOUNT/boot"
+        mkdir -p "$CONFIG_MOUNT"
         mount "$3" "$CONFIG_MOUNT"
+        mkdir -p "$CONFIG_MOUNT/boot"
         mount "$1" "$CONFIG_MOUNT/boot"
     fi
 }
@@ -192,7 +195,6 @@ set_conf_variable() {
 setup_makeconf() {
     header "Setting up portage/make.conf"
     MAKECONF=$CONFIG_MOUNT/etc/portage/make.conf
-    CPUCORES=$(nproc)
 
     rm $MAKECONF
 
@@ -348,6 +350,7 @@ load_config() {
     if [[ 8392704 -lt $MEM_KB ]]; then
         SUGGESTED_SWAP_SIZE=8392704
     fi
+    SUGGESTED_SWAP_SIZE=$(( ((SUGGESTED_SWAP_SIZE + 1023) / 1024) * 1024 ))
 
     # Suggest default
     checks CONFIG_SWAPSIZE $SUGGESTED_SWAP_SIZE
@@ -367,6 +370,8 @@ load_config() {
     checks CONFIG_RUSTFLAGS "\${COMMON_FLAGS}"
     checks CONFIG_LICENSES "*"
 
+    CPUCORES=$(nproc)
+
     MAX_JOBS_BY_RAM=$((MEM_KB / 2097152))
     MAX_JOBS_BY_CPU=$CPUCORES
 
@@ -385,7 +390,8 @@ system_checks() {
     fi
 
     if [[ $(uname -m) != "x86_64" ]]; then
-        echo "Only x86-64 CPUs are supported"
+        echo "Your system: $(uname -sm)"
+        echo "Only x86_64 systems are supported"
         exit
     fi
 
