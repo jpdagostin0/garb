@@ -116,7 +116,7 @@ test_net() {
 
 check_update() {
     header "Checking for GARB Updates"
-    CURRENT_VER=$(sha256sum "$0" | awk '{print $1}')
+    CURRENT_VER=$(cat "$0" | sha256sum | awk '{print $1}')
     SCRIPT_DATA=$(curl -fSsL $GARB_ONLINE )
     NEXT_VER=$(echo "$SCRIPT_DATA" | sha256sum | awk '{print $1}')
 
@@ -128,6 +128,7 @@ check_update() {
         fi
         echo "Loading updates automatically"
         echo "$SCRIPT_DATA" > "$0.tmp" && mv "$0.tmp" "$0"
+        chmod +x "$0"
         exec "$0" "$@"
     fi
 }
@@ -233,7 +234,7 @@ setup_stagefile() {
         chronyc -a makestep > /dev/null 2>&1
     fi
 
-    S3LATEST=$(curl -fs "https://distfiles.gentoo.org/releases/$CONFIG_ARCH/autobuilds/latest-stage3-$CONFIG_ARCH-$CONFIG_PROFILE.txt" | awk '!/^#/ {print $1; exit}')
+    S3LATEST=$(curl -fs "https://distfiles.gentoo.org/releases/$CONFIG_ARCH/autobuilds/latest-stage3-$CONFIG_ARCH-$CONFIG_PROFILE.txt" | sed -n '6p' | awk '{print $1}')
     S3DL="https://distfiles-cdn-origin.gentoo.org/releases/$CONFIG_ARCH/autobuilds/$S3LATEST"
     curl "$S3DL" -o stage3.tar.xz
     curl -f "$S3DL.sha256" -o stage3.tar.xz.sha256
