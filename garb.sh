@@ -146,6 +146,7 @@ prepare_disks() {
     parted -s "$DEVICE" mkpart primary linux-swap "$DEFAULT_BOOTEND"KiB "$EOSWAP"KiB
     parted -s "$DEVICE" mkpart primary "$EOSWAP"KiB 100%
     partprobe "$DEVICE"
+    udevadm settle
     
     PART1="${DEVICE}1"
     PART2="${DEVICE}2"
@@ -247,13 +248,14 @@ setup_chroot() {
 }
 
 chroot_work() {
+    set -ex
     source /etc/profile
     source /config.sh
     emerge-webrsync
     emerge --oneshot app-portage/cpuid2cpuflags
     echo "*/* $(cpuid2cpuflags)" > /etc/portage/package.use/00cpu-flags
 
-    if [[ -f "/usr/share/zoneinfo" ]]; then
+    if [[ -d "/usr/share/zoneinfo" ]]; then
         ln -sf "../../usr/share/zoneinfo/$CONFIG_TIMEZONE" /etc/localtime
     fi
 
@@ -266,14 +268,22 @@ chroot_work() {
 
     emerge sys-kernel/linux-firmware sys-firmware/sof-firmware
 
-    lscpu | grep Intel >> /dev/null
-    if [[ $? -eq 0 ]]; then
+    if lscpu | grep -q Intel; then
         emerge sys-firmware/intel-microcode
     fi
 
     echo "sys-kernel/installkernel grub dracut" >> /etc/portage/package.use/installkernel
 
     emerge sys-kernel/installkernel
+
+    mkdir -p /boot/grub
+
+    if [[ $CONFIG_UEFI -eq 1 ]]; then
+        grub-install --target=x86_64-efi --efi-directory=/efi --recheck
+    else
+        grub-install --recheck "/dev/$CONFIG_DISK"
+    fi
+
     emerge sys-kernel/"$CONFIG_KERNEL"
 
     {
@@ -293,14 +303,6 @@ chroot_work() {
         SWAP_SRC=$(swapon --noheadings --show=NAME | head -n1)
         echo "UUID=$(blkid -s UUID -o value "$SWAP_SRC") none swap sw 0 0"
     } > /etc/fstab
-
-    emerge sys-boot/grub
-
-    if [[ $CONFIG_UEFI -eq 1 ]]; then
-        grub-install --target=x86_64-efi --efi-directory=/efi
-    else
-        grub-install "/dev/$CONFIG_DISK"
-    fi
 
     grub-mkconfig -o /boot/grub/grub.cfg
 
