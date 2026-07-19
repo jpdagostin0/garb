@@ -4,7 +4,6 @@ GARB_VERSION="1.0"
 GARB_CONFIG_VERSION="1"
 GARB_CONFIG_LOCATION="config.sh"
 #GARB_BYPASS_SYSTEMCHECK=1
-
 # Defaults
 DEFAULT_BOOTEND=1048576 # ~1GB
 DEFAULT_FILESYSTEM="xfs"
@@ -15,7 +14,7 @@ DEFAULT_PROFILE="desktop-openrc"
 DEFAULT_BOOTLOADER="grub"
 DEFAULT_HOSTNAME="gentoo"
 DEFAULT_KERNEL="gentoo-kernel-bin"
-DEFAULT_LOCALE="$(locale | grep LANG | awk -F= '{print $2}') UTF-8"
+DEFAULT_LOCALE="$LANG UTF-8"
 
 # Variables
 GARB_INTERNET=1
@@ -172,8 +171,6 @@ prepare_disks() {
 mount_disks() {
     swapon "$2"
 
-    checks CONFIG_MOUNT $DEFAULT_MOUNT
-
     if [[ $CONFIG_UEFI -eq 1 ]]; then
         mkdir -p "$CONFIG_MOUNT/efi"
         mount "$3" "$CONFIG_MOUNT"
@@ -183,8 +180,6 @@ mount_disks() {
         mount "$3" "$CONFIG_MOUNT"
         mount "$1" "$CONFIG_MOUNT/boot"
     fi
-
-    cp $GARB_CONFIG_LOCATION $CONFIG_MOUNT
 }
 
 # $1 conf location
@@ -199,12 +194,6 @@ setup_makeconf() {
     MAKECONF=$CONFIG_MOUNT/etc/portage/make.conf
     CPUCORES=$(nproc)
 
-    checks CONFIG_COMMON_FLAGS "-march=native -O2 -pipe"
-    checks CONFIG_CFLAGS "\${COMMON_FLAGS}"
-    checks CONFIG_CXXFLAGS "\${COMMON_FLAGS}"
-    checks CONFIG_RUSTFLAGS "\${COMMON_FLAGS}"
-    checks CONFIG_LICENSES "*"
-
     rm $MAKECONF
 
     set_conf_variable $MAKECONF "COMMON_FLAGS" $CONFIG_COMMON_FLAGS
@@ -212,15 +201,6 @@ setup_makeconf() {
     set_conf_variable $MAKECONF "CXXFLAGS" $CONFIG_CXXFLAGS
     set_conf_variable $MAKECONF "RUSTFLAGS" $CONFIG_RUSTFLAGS
     set_conf_variable $MAKECONF "ACCEPT_LICENSE" $CONFIG_LICENSES
-
-    MAX_JOBS_BY_RAM=$((MEM_KB / 2097152))
-    MAX_JOBS_BY_CPU=$CPUCORES
-
-    if [[ MAX_JOBS_BY_CPU -lt MAX_JOBS_BY_RAM ]]; then
-        checks CONFIG_JOBS $MAX_JOBS_BY_CPU
-    else
-        checks CONFIG_JOBS $MAX_JOBS_BY_RAM
-    fi
 
     set_conf_variable $MAKECONF "MAKEOPTS" "-j$CONFIG_JOBS -l$((CONFIG_JOBS + 1))"
 }
@@ -246,9 +226,6 @@ setup_chroot() {
     mount --make-rslave "$CONFIG_MOUNT/dev"
     mount --bind /run "$CONFIG_MOUNT/run"
     mount --make-slave "$CONFIG_MOUNT/run"
-
-    checks CONFIG_TIMEZONE $(curl -fSsL https://ipinfo.io/json | grep timezone | sed 's/[^a-zA-Z0-9/_ ]//g' | awk '{print $2}')
-    checks CONFIG_LOCALE $DEFAULT_LOCALE
 
     cp --dereference $GARB_CONFIG_LOCATION $CONFIG_MOUNT/config.sh
     cp --dereference /etc/resolv.conf $CONFIG_MOUNT/etc/
@@ -368,7 +345,7 @@ load_config() {
     fi
     
     # 8G maximum
-    if [[8392704 -lt $MEM_KB ]]; then
+    if [[ 8392704 -lt $MEM_KB ]]; then
         SUGGESTED_SWAP_SIZE=8392704
     fi
 
@@ -379,6 +356,25 @@ load_config() {
     checks CONFIG_ARCH "amd64"
     checks CONFIG_HOSTNAME $DEFAULT_HOSTNAME
     checks CONFIG_KERNEL $DEFAULT_KERNEL
+
+    checks CONFIG_TIMEZONE $(curl -fSsL https://ipapi.co/timezone)
+    checks CONFIG_LOCALE $DEFAULT_LOCALE
+    checks CONFIG_MOUNT $DEFAULT_MOUNT
+
+    checks CONFIG_COMMON_FLAGS "-march=native -O2 -pipe"
+    checks CONFIG_CFLAGS "\${COMMON_FLAGS}"
+    checks CONFIG_CXXFLAGS "\${COMMON_FLAGS}"
+    checks CONFIG_RUSTFLAGS "\${COMMON_FLAGS}"
+    checks CONFIG_LICENSES "*"
+
+    MAX_JOBS_BY_RAM=$((MEM_KB / 2097152))
+    MAX_JOBS_BY_CPU=$CPUCORES
+
+    if [[ MAX_JOBS_BY_CPU -lt MAX_JOBS_BY_RAM ]]; then
+        checks CONFIG_JOBS $MAX_JOBS_BY_CPU
+    else
+        checks CONFIG_JOBS $MAX_JOBS_BY_RAM
+    fi
 }
 
 system_checks() {
