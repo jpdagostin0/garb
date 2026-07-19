@@ -1,5 +1,6 @@
 #!/bin/bash
 # Version Info
+GARB_VERSION="1"
 GARB_CONFIG_VERSION="1"
 GARB_CONFIG_LOCATION="config.sh"
 GARB_ONLINE="https://raw.githubusercontent.com/jpdagostin0/garb/refs/heads/main/garb.sh"
@@ -55,7 +56,7 @@ write_config() {
     if [[ $1 == CONFIG_* ]]; then
         if [[ GARB_BUILD_CONFIG -eq 1 ]]; then
             echo "Writing to config..."
-            echo "$1=$2" >> $GARB_CONFIG_LOCATION
+            printf '%s=%q\n' "$1" "$2" >> "$GARB_CONFIG_LOCATION"
         fi
     fi
 }
@@ -117,7 +118,7 @@ check_update() {
     header "Checking for GARB Updates"
     CURRENT_VER=$(sha256sum "$0" | awk '{print $1}')
     SCRIPT_DATA=$(curl -fSsL $GARB_ONLINE )
-    NEXT_VER=$(echo $SCRIPT_DATA | sha256sum | awk '{print $1}')
+    NEXT_VER=$(echo "$SCRIPT_DATA" | sha256sum | awk '{print $1}')
 
     if [[ $CURRENT_VER != $NEXT_VER ]]; then
         echo "Updates are available! Loading them for you..."
@@ -137,7 +138,7 @@ prepare_disks() {
         parted -s "$DEVICE" mkpart ESP 1MiB "$DEFAULT_BOOTEND"KiB
         parted -s "$DEVICE" set 1 esp on
     else
-        parted -s "$DEVICE" mklabel mbr
+        parted -s "$DEVICE" mklabel msdos
         parted -s "$DEVICE" mkpart primary 1MiB "$DEFAULT_BOOTEND"KiB
     fi
     
@@ -164,10 +165,10 @@ prepare_disks() {
         PART3="${DEVICE}p3"
     fi
 
-    MKFS="mkfs.$DEFAULT_FILESYSTEM"
+    MKFS="mkfs.$CONFIG_FILESYSTEM"
 
-    if [[ $DEFAULT_FILESYSTEM == "zfs" ]]; then
-        MKFS="zpool create"
+    if [[ $CONFIG_FILESYSTEM == "zfs" ]]; then
+        MKFS="zpool create rpool"
     fi
 
     $MKFS "$PART3"
@@ -203,7 +204,7 @@ mount_disks() {
 # $2 variable
 # $3 value
 set_conf_variable() {
-    echo "$2=\"$3\"" >> $1
+    echo "$2=\"$3\"" >> "$1"
 }
 
 setup_makeconf() {
@@ -212,13 +213,13 @@ setup_makeconf() {
 
     rm $MAKECONF
 
-    set_conf_variable $MAKECONF "COMMON_FLAGS" $CONFIG_COMMON_FLAGS
-    set_conf_variable $MAKECONF "CFLAGS" $CONFIG_CFLAGS
-    set_conf_variable $MAKECONF "CXXFLAGS" $CONFIG_CXXFLAGS
-    set_conf_variable $MAKECONF "RUSTFLAGS" $CONFIG_RUSTFLAGS
-    set_conf_variable $MAKECONF "ACCEPT_LICENSE" $CONFIG_LICENSES
+    set_conf_variable "$MAKECONF" "COMMON_FLAGS" "$CONFIG_COMMON_FLAGS"
+    set_conf_variable "$MAKECONF" "CFLAGS" "$CONFIG_CFLAGS"
+    set_conf_variable "$MAKECONF" "CXXFLAGS" "$CONFIG_CXXFLAGS"
+    set_conf_variable "$MAKECONF" "RUSTFLAGS" "$CONFIG_RUSTFLAGS"
+    set_conf_variable "$MAKECONF" "ACCEPT_LICENSE" "$CONFIG_LICENSES"
 
-    set_conf_variable $MAKECONF "MAKEOPTS" "-j$CONFIG_JOBS -l$((CONFIG_JOBS + 1))"
+    set_conf_variable "$MAKECONF" "MAKEOPTS" "-j$CONFIG_JOBS -l$((CONFIG_JOBS + 1))"
 }
 
 setup_stagefile() {
@@ -227,7 +228,7 @@ setup_stagefile() {
         chronyc -a makestep > /dev/null 2>&1
     fi
 
-    S3LATEST=$(curl -fs "https://distfiles.gentoo.org/releases/$CONFIG_ARCH/autobuilds/latest-stage3-$CONFIG_ARCH-$CONFIG_PROFILE.txt" | sed -n '6p' | awk '{print $1}')
+    S3LATEST=$(curl -fs "https://distfiles.gentoo.org/releases/$CONFIG_ARCH/autobuilds/latest-stage3-$CONFIG_ARCH-$CONFIG_PROFILE.txt" | awk '/stage3.*\.tar\.xz/ {print $1; exit}')
     S3DL="https://distfiles-cdn-origin.gentoo.org/releases/$CONFIG_ARCH/autobuilds/$S3LATEST"
     curl "$S3DL" -o stage3.tar.xz
     tar xpvf stage3.tar.xz --xattrs-include='*.*' --numeric-owner -C $CONFIG_MOUNT
