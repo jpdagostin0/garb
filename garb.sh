@@ -257,7 +257,7 @@ setup_stagefile() {
         chronyc -a makestep > /dev/null 2>&1
     fi
 
-    S3LATEST=$(curl -fsSL "https://distfiles.gentoo.org/releases/$CONFIG_ARCH/autobuilds/latest-stage3-$CONFIG_ARCH-$CONFIG_PROFILE.txt" | awk '!/^#/ && NF {print $1; exit}')
+    S3LATEST=$(curl -fsSL "https://distfiles.gentoo.org/releases/$CONFIG_ARCH/autobuilds/latest-stage3-$CONFIG_ARCH-$CONFIG_PROFILE.txt" | awk '!/^(#|-|H)/ && NF {print $1; exit}')
     S3DL="https://distfiles-cdn-origin.gentoo.org/releases/$CONFIG_ARCH/autobuilds/$S3LATEST"
 
     curl -fsSL "$S3DL" -o stage3.tar.xz
