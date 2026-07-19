@@ -257,9 +257,11 @@ setup_stagefile() {
         chronyc -a makestep > /dev/null 2>&1
     fi
 
+    pinfo "Getting latest release information"
     S3LATEST=$(curl -fsSL "https://distfiles.gentoo.org/releases/$CONFIG_ARCH/autobuilds/latest-stage3-$CONFIG_ARCH-$CONFIG_PROFILE.txt" | awk '!/^(#|-|H)/ && NF {print $1; exit}')
     S3DL="https://distfiles-cdn-origin.gentoo.org/releases/$CONFIG_ARCH/autobuilds/$S3LATEST"
 
+    pinfo "Pulling tarball and metadata"
     curl -fsSL "$S3DL" -o stage3.tar.xz
     nicerr "Failed to download tarball"
     curl -fsSL "$S3DL.DIGESTS" -o stage3.tar.xz.DIGESTS
@@ -398,7 +400,7 @@ chroot_work() {
     rc-update add chronyd default
     rc-update add cronie default
 
-    emerge --ask app-portage/gentoolkit
+    emerge app-portage/gentoolkit
     eclean-dist
     eclean-pkg
 }
@@ -414,7 +416,7 @@ cleanup_reboot() {
     swapoff -a
     umount -R "$CONFIG_MOUNT"
     pinfo "Installation completed"
-    askab "shutown -r now" "exit"
+    askab "shutdown -r now" "exit"
 }
 
 load_config() {
