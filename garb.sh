@@ -121,7 +121,12 @@ check_update() {
     NEXT_VER=$(echo "$SCRIPT_DATA" | sha256sum | awk '{print $1}')
 
     if [[ $CURRENT_VER != $NEXT_VER ]]; then
-        echo "Updates are available! Loading them for you..."
+        echo "Updates are available!"
+        if [[ ! -f "$0" || ! -w "$0" ]]; then
+            echo "Not running from a writable script file... skipping update"
+            return
+        fi
+        echo "Loading updates automatically"
         echo "$SCRIPT_DATA" > "$0.tmp" && mv "$0.tmp" "$0"
         exec "$0" "$@"
     fi
@@ -246,6 +251,13 @@ setup_chroot() {
 
     cp --dereference $GARB_CONFIG_LOCATION $CONFIG_MOUNT/config.sh
     cp --dereference /etc/resolv.conf $CONFIG_MOUNT/etc/
+
+    if [[ -d /etc/NetworkManager/system-connections ]]; then
+        mkdir -p "$CONFIG_MOUNT/etc/NetworkManager/system-connections"
+        cp -a /etc/NetworkManager/system-connections/. "$CONFIG_MOUNT/etc/NetworkManager/system-connections/"
+        chmod 700 "$CONFIG_MOUNT/etc/NetworkManager/system-connections"
+        chmod 600 "$CONFIG_MOUNT/etc/NetworkManager/system-connections/"* 2>/dev/null
+    fi
 }
 
 chroot_work() {
@@ -301,7 +313,7 @@ chroot_work() {
             echo "UUID=$(blkid -s UUID -o value "$BOOT_SRC") /boot $BOOT_FSTYPE noatime 0 2"
         fi
 
-        SWAP_SRC=$(swapon --noheadings --show=NAME | head -n1)
+        SWAP_SRC=$(swapon --noheadings --show=NAME | grep '^/dev/' | grep -v zram | head -n1)
         echo "UUID=$(blkid -s UUID -o value "$SWAP_SRC") none swap sw 0 0"
     } > /etc/fstab
 
@@ -316,12 +328,33 @@ chroot_work() {
 
     emerge app-admin/sudo
     sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
+
+    emerge net-misc/networkmanager app-admin/sysklogd net-misc/chrony sys-process/cronie
+    rc-update add NetworkManager default
+    rc-update add sysklogd default
+    rc-update add chronyd default
+    rc-update add cronie default
+
+    emerge --ask app-portage/gentoolkit
+    eclean-dist
+    eclean-pkg
 }
 
 enable_chroot() {
     header "Working inside chroot"
     export -f chroot_work
     chroot "$CONFIG_MOUNT" /bin/bash -c "chroot_work"
+}
+
+cleanup_reboot() {
+    header "Cleaning Up"
+    swapoff -a
+    umount -R "$CONFIG_MOUNT"
+    echo "Installation complete!"
+    read -r -p "Reboot now? [Y/n] " response
+    if [[ ! "$response" =~ ^([nN])$ ]]; then
+        reboot
+    fi
 }
 
 load_config() {
@@ -376,7 +409,8 @@ load_config() {
     checks CONFIG_HOSTNAME $DEFAULT_HOSTNAME
     checks CONFIG_KERNEL $DEFAULT_KERNEL
 
-    checks CONFIG_TIMEZONE $(curl -fSsL https://ipapi.co/timezone)
+    DETECTED_TIMEZONE=$(curl -fSsL https://ipapi.co/timezone) || DETECTED_TIMEZONE="UTC"
+    checks CONFIG_TIMEZONE "$DETECTED_TIMEZONE"
     checks CONFIG_LOCALE $DEFAULT_LOCALE
     checks CONFIG_MOUNT $DEFAULT_MOUNT
 
@@ -441,3 +475,4 @@ setup_stagefile
 setup_makeconf
 setup_chroot
 enable_chroot
+cleanup_reboot
