@@ -170,11 +170,11 @@ prepare_disks() {
         PART3="${DEVICE}p3"
     fi
 
-    MKFS="mkfs.$CONFIG_FILESYSTEM"
-
-    if [[ $CONFIG_FILESYSTEM == "zfs" ]]; then
-        MKFS="zpool create rpool"
-    fi
+    case $CONFIG_FILESYSTEM in
+        ext4) MKFS="mkfs.ext4 -F" ;;
+        xfs) MKFS="mkfs.xfs -f" ;;
+        btrfs) MKFS="mkfs.btrfs -f" ;;
+    esac
 
     $MKFS "$PART3"
     mkswap "$PART2"
@@ -182,7 +182,7 @@ prepare_disks() {
     if [[ $CONFIG_UEFI -eq 1 ]]; then
         mkfs.fat -F 32 "$PART1"
     else
-        "$MKFS" "$PART1"
+        $MKFS "$PART1"
     fi
 
     mount_disks "$PART1" "$PART2" "$PART3"
@@ -236,6 +236,26 @@ setup_stagefile() {
     S3LATEST=$(curl -fs "https://distfiles.gentoo.org/releases/$CONFIG_ARCH/autobuilds/latest-stage3-$CONFIG_ARCH-$CONFIG_PROFILE.txt" | awk '!/^#/ {print $1; exit}')
     S3DL="https://distfiles-cdn-origin.gentoo.org/releases/$CONFIG_ARCH/autobuilds/$S3LATEST"
     curl "$S3DL" -o stage3.tar.xz
+    curl -f "$S3DL.sha256" -o stage3.tar.xz.sha256
+    curl -f "$S3DL.asc" -o stage3.tar.xz.asc
+
+    EXPECTED_SHA=$(awk '/tar\.xz$/ {print $1; exit}' stage3.tar.xz.sha256)
+    ACTUAL_SHA=$(sha256sum stage3.tar.xz | awk '{print $1}')
+    if [[ -z "$EXPECTED_SHA" || "$EXPECTED_SHA" != "$ACTUAL_SHA" ]]; then
+        echo "Stage3 checksum mismatch!"
+        exit 1
+    fi
+
+    if [[ -f /usr/share/openpgp-keys/gentoo-release.asc ]]; then
+        gpg --import /usr/share/openpgp-keys/gentoo-release.asc
+        if ! gpg --verify stage3.tar.xz.asc stage3.tar.xz; then
+            echo "Stage3 GPG verification failed!"
+            exit 1
+        fi
+    else
+        echo "Gentoo release key not found... skipping GPG verification"
+    fi
+
     tar xpvf stage3.tar.xz --xattrs-include='*.*' --numeric-owner -C $CONFIG_MOUNT
 }
 
@@ -261,11 +281,25 @@ setup_chroot() {
 }
 
 chroot_work() {
-    set -ex
+    # Runs a command with interactive recovery on failure
+    try() {
+        while ! "$@"; do
+            echo "Command failed: $*"
+            read -r -p "[r]etry, [s]hell, [i]gnore, [a]bort? " response
+            case "$response" in
+                [rR]) ;;
+                [sS]) /bin/bash ;;
+                [iI]) return 0 ;;
+                *) exit 1 ;;
+            esac
+        done
+    }
+
     source /etc/profile
     source /config.sh
-    emerge-webrsync
-    emerge --oneshot app-portage/cpuid2cpuflags
+    set -e
+    try emerge-webrsync
+    try emerge --oneshot app-portage/cpuid2cpuflags
     echo "*/* $(cpuid2cpuflags)" > /etc/portage/package.use/00cpu-flags
 
     if [[ -d "/usr/share/zoneinfo" ]]; then
@@ -274,30 +308,30 @@ chroot_work() {
 
     if [[ -f "/etc/locale.gen" ]]; then
         echo $CONFIG_LOCALE >> /etc/locale.gen
-        locale-gen
+        try locale-gen
     fi
 
     env-update && source /etc/profile && source /config.sh
 
-    emerge sys-kernel/linux-firmware sys-firmware/sof-firmware
+    try emerge sys-kernel/linux-firmware sys-firmware/sof-firmware
 
     if lscpu | grep -q Intel; then
-        emerge sys-firmware/intel-microcode
+        try emerge sys-firmware/intel-microcode
     fi
 
     echo "sys-kernel/installkernel grub dracut" >> /etc/portage/package.use/installkernel
 
-    emerge sys-kernel/installkernel
+    try emerge sys-kernel/installkernel
 
     mkdir -p /boot/grub
 
     if [[ $CONFIG_UEFI -eq 1 ]]; then
-        grub-install --target=x86_64-efi --efi-directory=/efi --recheck
+        try grub-install --target=x86_64-efi --efi-directory=/efi --recheck
     else
-        grub-install --recheck "/dev/$CONFIG_DISK"
+        try grub-install --recheck "/dev/$CONFIG_DISK"
     fi
 
-    emerge sys-kernel/"$CONFIG_KERNEL"
+    try emerge sys-kernel/"$CONFIG_KERNEL"
 
     {
         ROOT_SRC=$(findmnt -no SOURCE /)
@@ -317,19 +351,19 @@ chroot_work() {
         echo "UUID=$(blkid -s UUID -o value "$SWAP_SRC") none swap sw 0 0"
     } > /etc/fstab
 
-    grub-mkconfig -o /boot/grub/grub.cfg
+    try grub-mkconfig -o /boot/grub/grub.cfg
 
     echo "$CONFIG_HOSTNAME" > /etc/hostname
     echo "hostname=\"$CONFIG_HOSTNAME\"" > /etc/conf.d/hostname
 
     echo "root:$CONFIG_ROOTPASS" | chpasswd
-    useradd -m -G wheel,users -s /bin/bash "$CONFIG_USERNAME"
+    try useradd -m -G wheel,users -s /bin/bash "$CONFIG_USERNAME"
     echo "$CONFIG_USERNAME:$CONFIG_PASSWORD" | chpasswd
 
-    emerge app-admin/sudo
+    try emerge app-admin/sudo
     sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 
-    emerge net-misc/networkmanager app-admin/sysklogd net-misc/chrony sys-process/cronie
+    try emerge net-misc/networkmanager app-admin/sysklogd net-misc/chrony sys-process/cronie
     rc-update add NetworkManager default
     rc-update add sysklogd default
     rc-update add chronyd default
@@ -342,7 +376,7 @@ chroot_work() {
 
 enable_chroot() {
     header "Working inside chroot"
-    export -f chroot_work
+    export -f chroot_work try
     chroot "$CONFIG_MOUNT" /bin/bash -c "chroot_work"
 }
 
@@ -386,6 +420,10 @@ load_config() {
     fi
 
     checks CONFIG_FILESYSTEM $DEFAULT_FILESYSTEM
+    if [[ ! $CONFIG_FILESYSTEM =~ ^(ext4|xfs|btrfs)$ ]]; then
+        echo "Unsupported filesystem: $CONFIG_FILESYSTEM (supported: ext4, xfs, btrfs)"
+        exit 1
+    fi
     MEM_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
 
     SUGGESTED_SWAP_SIZE=$MEM_KB
