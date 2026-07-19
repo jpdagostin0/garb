@@ -1,8 +1,8 @@
 #!/bin/bash
 # Version Info
-GARB_VERSION="1.0"
 GARB_CONFIG_VERSION="1"
 GARB_CONFIG_LOCATION="config.sh"
+GARB_ONLINE="https://raw.githubusercontent.com/jpdagostin0/garb/refs/heads/main/garb.sh"
 #GARB_BYPASS_SYSTEMCHECK=1
 
 # Defaults
@@ -110,6 +110,19 @@ test_net() {
     if [[ $STATUS -ne 0 ]]; then
         echo "Could not access $DEFAULT_CHECKSITE"
         askab "nmtui" "export GARB_INTERNET=0"
+    fi
+}
+
+check_update() {
+    header "Checking for GARB Updates"
+    CURRENT_VER=$(sha256sum "$0" | awk '{print $1}')
+    SCRIPT_DATA=$(curl -fSsL $GARB_ONLINE )
+    NEXT_VER=$(echo $SCRIPT_DATA | sha256sum | awk '{print $1}')
+
+    if [[ $CURRENT_VER != $NEXT_VER ]]; then
+        echo "Updates are available! Loading them for you..."
+        echo "$SCRIPT_DATA" > "$0.tmp" && mv "$0.tmp" "$0"
+        exec "$0" "$@"
     fi
 }
 
@@ -418,6 +431,7 @@ if [[ -z $GARB_BYPASS_SYSTEMCHECK ]]; then
     system_checks
 fi
 test_net
+check_update
 load_config
 prepare_disks
 setup_stagefile
