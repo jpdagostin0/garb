@@ -3,6 +3,7 @@
 GARB_VERSION="1"
 GARB_CONFIG_VERSION="1"
 GARB_CONFIG_LOCATION="config.sh"
+GARB_LOGFILE="garb_$(date +%s).log"
 GARB_ONLINE="https://raw.githubusercontent.com/jpdagostin0/garb/refs/heads/main/garb.sh"
 #GARB_BYPASS_SYSTEMCHECK=1
 
@@ -23,15 +24,37 @@ GARB_INTERNET=1
 GARB_BUILD_CONFIG=0
 RESOLV_NAMESERVER="$(grep nameserver /etc/resolv.conf | awk '{print $2}')"
 
+# $1 what to write as info
+pinfo() {
+    echo "[GARB] [INFO]" "$1"
+    echo "[GARB] [INFO]" "$1" >> $GARB_LOGFILE
+}
+
+pwarn() {
+    echo -e "\033[33m[GARB] [WARN]" "$1" "\033[0m"
+    echo "[GARB] [WARN]" "$1" >> $GARB_LOGFILE
+}
+
+perror() {
+    echo -e "\033[31m[GARB] [ERROR]" "$1" "\033[0m"
+    echo "[GARB] [ERROR]" "$1" >> $GARB_LOGFILE
+}
+
+nicerr() {
+    if [[ $? -ne 0 ]]; then
+        perror "$1"
+    fi
+}
+
 # Checks if the variable exists or prompts
 # $1 variable to read
 # $2 prompt text
 checkp() {
     local -n var="$1"
     if [[ -z "$var" ]]; then
-        echo "$1 not set... prompting"
+        pwarn "$1 not set... prompting"
         read -p "$2" var
-        echo "$1 set to $var"
+        pinfo "$1 set to $var"
         write_config "$1" "$var"
     fi
 }
@@ -44,7 +67,7 @@ checks() {
     if [[ -z "$var" ]]; then
         var="$2"
         export "$1"
-        echo "$1 not set... using default ($var)"
+        pwarn "$1 not set... using default ($var)"
         write_config "$1" "$var"
     fi
 }
@@ -55,7 +78,7 @@ checks() {
 write_config() {
     if [[ $1 == CONFIG_* ]]; then
         if [[ GARB_BUILD_CONFIG -eq 1 ]]; then
-            echo "Writing to config..."
+            pinfo "Writing to config..."
             printf '%s=%q\n' "$1" "$2" >> "$GARB_CONFIG_LOCATION"
         fi
     fi
@@ -75,6 +98,7 @@ header() {
 
 # Ask the user to run $1, otherwise $2
 askab() {
+    pinfo "Run $1, otherwise run $2"
     read -r -p "Run $1 [Y/n] " response
     if [[ "$response" =~ ^([nN])$ ]]
     then
@@ -100,7 +124,7 @@ test_net() {
     
     STATUS="$?"
     if [[ $STATUS -ne 0 ]]; then
-        echo "Could not ping $RESOLV_NAMESERVER"
+        perror "Could not ping $RESOLV_NAMESERVER"
         askab "nmtui" "export GARB_INTERNET=0"
     fi
 
@@ -109,7 +133,7 @@ test_net() {
     
     STATUS="$?"
     if [[ $STATUS -ne 0 ]]; then
-        echo "Could not access $DEFAULT_CHECKSITE"
+        perror "Could not access $DEFAULT_CHECKSITE"
         askab "nmtui" "export GARB_INTERNET=0"
     fi
 }
@@ -121,12 +145,12 @@ check_update() {
     NEXT_VER=$(echo "$SCRIPT_DATA" | sha256sum | awk '{print $1}')
 
     if [[ $CURRENT_VER != $NEXT_VER ]]; then
-        echo "Updates are available!"
+        pinfo "Updates are available!"
         if [[ ! -f "$0" || ! -w "$0" ]]; then
-            echo "Not running from a writable script file... skipping update"
+            pwarn "Not running from a writable script file... skipping update"
             return
         fi
-        echo "Loading updates automatically"
+        pinfo "Loading updates automatically"
         echo "$SCRIPT_DATA" > "$0.tmp" && mv "$0.tmp" "$0"
         chmod +x "$0"
         exec "$0" "$@"
@@ -134,7 +158,6 @@ check_update() {
 }
 
 prepare_disks() {
-    header "Preparing Disks"
     DEVICE="/dev/$CONFIG_DISK"
     wipefs -a "$DEVICE"
     sgdisk --zap-all "$DEVICE"
@@ -234,30 +257,35 @@ setup_stagefile() {
         chronyc -a makestep > /dev/null 2>&1
     fi
 
-    S3LATEST=$(curl -fs "https://distfiles.gentoo.org/releases/$CONFIG_ARCH/autobuilds/latest-stage3-$CONFIG_ARCH-$CONFIG_PROFILE.txt" | sed -n '6p' | awk '{print $1}')
+    S3LATEST=$(curl -fsSL "https://distfiles.gentoo.org/releases/$CONFIG_ARCH/autobuilds/latest-stage3-$CONFIG_ARCH-$CONFIG_PROFILE.txt" | awk '!/^#/ && NF {print $1; exit}')
     S3DL="https://distfiles-cdn-origin.gentoo.org/releases/$CONFIG_ARCH/autobuilds/$S3LATEST"
-    curl "$S3DL" -o stage3.tar.xz
-    curl -f "$S3DL.sha256" -o stage3.tar.xz.sha256
-    curl -f "$S3DL.asc" -o stage3.tar.xz.asc
 
-    EXPECTED_SHA=$(awk '/tar\.xz$/ {print $1; exit}' stage3.tar.xz.sha256)
-    ACTUAL_SHA=$(sha256sum stage3.tar.xz | awk '{print $1}')
-    if [[ -z "$EXPECTED_SHA" || "$EXPECTED_SHA" != "$ACTUAL_SHA" ]]; then
-        echo "Stage3 checksum mismatch!"
-        exit 1
-    fi
+    curl -fsSL "$S3DL" -o stage3.tar.xz
+    nicerr "Failed to download tarball"
+    curl -fsSL "$S3DL.DIGESTS" -o stage3.tar.xz.DIGESTS
+    nicerr "Failed to download DIGESTS"
+    curl -fsSL "$S3DL.DIGESTS.asc" -o stage3.tar.xz.DIGESTS.asc
+    nicerr "Failed to download DIGESTS.asc"
 
     if [[ -f /usr/share/openpgp-keys/gentoo-release.asc ]]; then
-        gpg --import /usr/share/openpgp-keys/gentoo-release.asc
-        if ! gpg --verify stage3.tar.xz.asc stage3.tar.xz; then
-            echo "Stage3 GPG verification failed!"
-            exit 1
+        if ! gpg --import /usr/share/openpgp-keys/gentoo-release.asc; then
+            pwarn "Failed to import Gentoo release key!"
+        fi
+
+        if ! gpg --verify stage3.tar.xz.DIGESTS.asc stage3.tar.xz.DIGESTS; then
+            pwarn "Stage3 DIGESTS signature verification failed!"
         fi
     else
-        echo "Gentoo release key not found... skipping GPG verification"
+        pwarn "Gentoo release key not found... skipping GPG verification"
     fi
 
-    tar xpvf stage3.tar.xz --xattrs-include='*.*' --numeric-owner -C $CONFIG_MOUNT
+    EXPECTED_SHA=$(awk '/^[0-9a-f]{64}[[:space:]]+/ && /tar\.xz$/ {print $1; exit}' stage3.tar.xz.DIGESTS)
+    ACTUAL_SHA=$(sha256sum stage3.tar.xz | awk '{print $1}')
+    if [[ -z "$EXPECTED_SHA" || "$EXPECTED_SHA" != "$ACTUAL_SHA" ]]; then
+        pwarn "Stage3 checksum mismatch!"
+    fi
+
+    tar xpvf stage3.tar.xz --xattrs-include='*.*' --numeric-owner -C "$CONFIG_MOUNT"
 }
 
 setup_chroot() {
@@ -385,11 +413,8 @@ cleanup_reboot() {
     header "Cleaning Up"
     swapoff -a
     umount -R "$CONFIG_MOUNT"
-    echo "Installation complete!"
-    read -r -p "Reboot now? [Y/n] " response
-    if [[ ! "$response" =~ ^([nN])$ ]]; then
-        reboot
-    fi
+    pinfo "Installation completed"
+    askab "shutown -r now" "exit"
 }
 
 load_config() {
@@ -410,7 +435,7 @@ load_config() {
     fi
 
     if [[ ! -b "/dev/$CONFIG_DISK" ]]; then
-        echo "Device not found: /dev/$CONFIG_DISK"
+        perror "Device not found: /dev/$CONFIG_DISK"
         exit
     fi
 
@@ -418,6 +443,7 @@ load_config() {
         checks CONFIG_UEFI 1
     else
         checks CONFIG_UEFI 0
+        pwarn "This setup is not officially supported"
     fi
 
     checks CONFIG_FILESYSTEM $DEFAULT_FILESYSTEM
@@ -449,6 +475,7 @@ load_config() {
     checks CONFIG_KERNEL $DEFAULT_KERNEL
 
     DETECTED_TIMEZONE=$(curl -fSsL https://ipapi.co/timezone) || DETECTED_TIMEZONE="UTC"
+    nicerr "Failed to automatically fetch timezone, using UTC"
     checks CONFIG_TIMEZONE "$DETECTED_TIMEZONE"
     checks CONFIG_LOCALE $DEFAULT_LOCALE
     checks CONFIG_MOUNT $DEFAULT_MOUNT
@@ -474,22 +501,22 @@ load_config() {
 system_checks() {
     header "Checking compatibility"
     if [[ $USER != "root" ]]; then
-        echo "Please run as root"
+        perror "Please run as root"
         exit
     fi
 
     if [[ $(uname -m) != "x86_64" ]]; then
-        echo "Your system: $(uname -sm)"
-        echo "Only x86_64 systems are supported"
+        pinfo "Your system: $(uname -sm)"
+        perror "Only x86_64 systems are supported"
         exit
     fi
 
     if [[ ! -d /sys/firmware/efi ]]; then
-        echo "Only UEFI is supported"
+        perror "Only UEFI is supported"
         exit
     fi
 
-    echo "Compatible System..."
+    pinfo "Compatible System..."
 }
 
 splash() {
@@ -500,6 +527,7 @@ splash() {
     echo "Version $GARB_VERSION"
     echo "Config Version $GARB_CONFIG_VERSION"
     echo "Config File $GARB_CONFIG_LOCATION"
+    echo "Logging to $GARB_LOGFILE"
 }
 
 splash
@@ -509,7 +537,9 @@ fi
 test_net
 check_update
 load_config
-prepare_disks
+header "Preparing Disks"
+pwarn "This will wipe all data off $CONFIG_DEVICE"
+askab "prepare_disks" "exit"
 setup_stagefile
 setup_makeconf
 setup_chroot
