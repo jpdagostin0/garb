@@ -72,14 +72,21 @@ checks() {
     fi
 }
 
+# $1 conf location
+# $2 variable
+# $3 value
+set_conf_variable() {
+    echo "$2=\"$3\"" >> "$1"
+}
+
 # Writes to config (if allowed)
-# $1 var
+# $1 variable
 # $2 value
 write_config() {
     if [[ $1 == CONFIG_* ]]; then
         if [[ GARB_BUILD_CONFIG -eq 1 ]]; then
             pinfo "Writing to config..."
-            printf '%s=%q\n' "$1" "$2" >> "$GARB_CONFIG_LOCATION"
+            set_conf_variable "$GARB_CONFIG_LOCATION" "$1" "$2"
         fi
     fi
 }
@@ -229,13 +236,6 @@ mount_disks() {
     fi
 }
 
-# $1 conf location
-# $2 variable
-# $3 value
-set_conf_variable() {
-    echo "$2=\"$3\"" >> "$1"
-}
-
 setup_makeconf() {
     header "Setting up portage/make.conf"
     MAKECONF=$CONFIG_MOUNT/etc/portage/make.conf
@@ -310,6 +310,164 @@ setup_chroot() {
         chmod 600 "$CONFIG_MOUNT/etc/NetworkManager/system-connections/"* 2>/dev/null
     fi
 }
+
+default_personal_fn() {
+    local SRC="$HOME/.local/src"
+ 
+    # $1 name
+    mci_this() {
+        cd "$1" || return 1
+        sudo make clean install
+        cd ..
+    }
+ 
+    find_battery() {
+        local power_supply
+        for power_supply in /sys/class/power_supply/*; do
+            [ -r "$power_supply/type" ] || continue
+            [ "$(cat "$power_supply/type")" = Battery ] || continue
+            if [ -r "$power_supply/scope" ] && [ "$(cat "$power_supply/scope")" = Device ]; then
+                continue
+            fi
+            basename "$power_supply"
+            return 0
+        done
+        return 1
+    }
+ 
+    slstatus_args() {
+        local bat
+        bat=$(find_battery) || bat=
+ 
+        echo 'static const struct arg args[] = {'
+        echo '    /* function       format          argument */'
+        echo "    { run_command,    \"%s | \",       \"$HOME/.local/bin/nmstat\" },"
+        echo "    { run_command,    \"vol %s | \",   \"$HOME/.local/bin/pwvol\" },"
+        if [ -n "$bat" ]; then
+            echo "    { battery_perc,   \"bat %s%% \",   \"$bat\" },"
+            echo "    { battery_state,  \"%s | \",       \"$bat\" },"
+        fi
+        echo '    { datetime,       "%s",           "%a %d %b  %H:%M" },'
+        echo '};'
+    }
+ 
+    printf '%s\n' "$CONFIG_PASSWORD" | sudo -S -v
+    ( while sudo -n true 2>/dev/null; do
+        sleep 50; kill -0 "$$" 2>/dev/null || exit
+    done ) &
+    local keepalive=$!
+    trap 'kill "$keepalive" 2>/dev/null' RETURN
+
+    sudo usermod -a -G video $CONFIG_USERNAME
+ 
+    cd
+    wget "https://gratisography.com/wp-content/uploads/2023/04/gratisography-heavenly-sky-free-stock-photo-1170x775.jpg" -O ~/wallpaper.jpg
+    sudo emerge --sync
+ 
+    sudo mkdir -p /etc/portage/package.use
+    echo "*/* elogind" | sudo tee /etc/portage/package.use/00elogind
+    printf '%s\n' \
+        '*/* pipewire' \
+        'media-video/pipewire sound-server pipewire-alsa dbus extra' \
+        'media-video/wireplumber elogind' \
+        | sudo tee /etc/portage/package.use/00pipewire
+ 
+    sudo emerge --update --deep --newuse @world
+    sudo emerge --noreplace \
+        x11-base/xorg-server x11-apps/xinit x11-apps/xrandr x11-apps/xset \
+        x11-libs/libX11 x11-libs/libXft x11-libs/libXinerama x11-libs/libXrandr \
+        x11-libs/libXext x11-libs/libXfixes x11-libs/libXcomposite \
+        x11-libs/libXmu x11-libs/libXScrnSaver \
+        media-libs/freetype media-fonts/dejavu media-fonts/terminus-font \
+        media-gfx/feh x11-misc/xss-lock x11-misc/xprintidle x11-misc/xclip \
+        x11-misc/dunst x11-libs/libnotify x11-misc/picom \
+        sys-auth/elogind sys-apps/dbus \
+        media-video/pipewire media-video/wireplumber media-libs/libpulse \
+        dev-vcs/git dev-build/make dev-build/autoconf dev-build/automake \
+        dev-build/libtool dev-util/pkgconf sys-libs/pam sys-power/acpilight
+    sudo rc-update add elogind boot
+    sudo rc-update add dbus default
+    sudo rc-service dbus start
+ 
+    mkdir -p "$SRC" "$HOME/.local/bin"
+    cd "$SRC"
+    git clone https://git.suckless.org/dwm
+    mci_this dwm
+    git clone https://git.suckless.org/dmenu
+    mci_this dmenu
+    git clone https://git.suckless.org/st
+    mci_this st
+ 
+    cat >"$HOME/.local/bin/pwvol" <<'EOF'
+#!/bin/sh
+wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null | awk '
+    /MUTED/ { print "mute"; exit }
+            { printf "%d%%\n", $2 * 100 }'
+EOF
+ 
+    cat >"$HOME/.local/bin/nmstat" <<'EOF'
+#!/bin/sh
+active=$(nmcli -t -f TYPE,NAME connection show --active 2>/dev/null)
+ 
+# substr past the first colon, so SSIDs with spaces or escaped colons survive
+ssid=$(printf '%s\n' "$active" | awk -F: '
+    $1 == "802-11-wireless" {
+        n = substr($0, index($0, ":") + 1)
+        gsub(/\\:/, ":", n)
+        print n
+        exit
+    }')
+ 
+if [ -n "$ssid" ]; then
+    # --rescan no, or nmcli kicks off a fresh AP scan on every single poll
+    sig=$(nmcli -t -f IN-USE,SIGNAL device wifi list --rescan no 2>/dev/null |
+          awk -F: '$1 == "*" { print $2; exit }')
+    [ -n "$sig" ] && printf '%s %s%%\n' "$ssid" "$sig" || printf '%s\n' "$ssid"
+elif printf '%s\n' "$active" | grep -q '^802-3-ethernet:'; then
+    echo eth
+else
+    echo down
+fi
+EOF
+    chmod +x "$HOME/.local/bin/pwvol" "$HOME/.local/bin/nmstat"
+ 
+    git clone https://git.suckless.org/slstatus
+    ( cd "$SRC/slstatus" || exit 1
+      sed -e 's/^const unsigned int interval = .*/const unsigned int interval = 2000;/' \
+          -e '/^static const struct arg args\[\] = {/,/^};/d' config.def.h >config.h
+      slstatus_args >>config.h )
+    mci_this slstatus
+ 
+    git clone https://github.com/google/xsecurelock.git
+    ( cd "$SRC/xsecurelock" || exit 1
+        sh autogen.sh &&
+        ./configure --with-pam-service-name=system-auth &&
+        make &&
+        sudo make install )
+ 
+    cat >"$HOME/.xinitrc" <<'EOF'
+#!/bin/sh
+if [ -d /etc/X11/xinit/xinitrc.d ]; then
+    for f in /etc/X11/xinit/xinitrc.d/?*; do
+        [ -x "$f" ] && . "$f"
+    done
+    unset f
+fi
+xrandr --auto
+feh --bg-scale ~/wallpaper.jpg &
+gentoo-pipewire-launcher restart &
+xset s 300 5
+xss-lock -n /usr/local/libexec/xsecurelock/dimmer -l -- xsecurelock &
+picom &
+dunst &
+slstatus &
+exec dwm
+EOF
+    chmod +x "$HOME/.xinitrc"
+}
+
+# Because config.sh is sourced, it should be fine to just write something and set CONFIG_PERSONAL_FUNCTION
+DEFAULT_PERSONAL_FUNCTION="default_personal_fn"
 
 chroot_work() {
     # Runs a command with interactive recovery on failure
@@ -395,20 +553,27 @@ chroot_work() {
     sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 
     try emerge net-misc/networkmanager app-admin/sysklogd net-misc/chrony sys-process/cronie
-    rc-update add NetworkManager default
-    rc-update add sysklogd default
-    rc-update add chronyd default
-    rc-update add cronie default
+    try rc-update add NetworkManager default
+    try rc-update add sysklogd default
+    try rc-update add chronyd default
+    try rc-update add cronie default
 
-    emerge app-portage/gentoolkit
-    eclean-dist
-    eclean-pkg
+    try emerge app-portage/gentoolkit
+    try eclean-dist
+    try eclean-pkg
+
+    echo "Launching personal function..."
 }
 
 enable_chroot() {
     header "Working inside chroot"
-    export -f chroot_work try
+    export -f chroot_work
     chroot "$CONFIG_MOUNT" /bin/bash -c "chroot_work"
+
+    { declare -p $(compgen -v CONFIG_)
+      declare -f "$CONFIG_PERSONAL_FUNCTION"
+      printf '%s\n' "$CONFIG_PERSONAL_FUNCTION"
+    } | chroot "$CONFIG_MOUNT" sudo -u "$CONFIG_USERNAME" -H bash -s
 }
 
 cleanup_reboot() {
@@ -488,6 +653,8 @@ load_config() {
     checks CONFIG_RUSTFLAGS "\${COMMON_FLAGS}"
     checks CONFIG_LICENSES "*"
 
+    checks CONFIG_PERSONAL_FUNCTION $DEFAULT_PERSONAL_FUNCTION
+
     CPUCORES=$(nproc)
 
     MAX_JOBS_BY_RAM=$((MEM_KB / 2097152))
@@ -540,7 +707,7 @@ test_net
 check_update
 load_config
 header "Preparing Disks"
-pwarn "This will wipe all data off $CONFIG_DEVICE"
+pwarn "This will wipe all data off $CONFIG_DISK"
 askab "prepare_disks" "exit"
 setup_stagefile
 setup_makeconf
