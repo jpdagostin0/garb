@@ -249,6 +249,7 @@ setup_makeconf() {
     set_conf_variable "$MAKECONF" "ACCEPT_LICENSE" "$CONFIG_LICENSES"
 
     set_conf_variable "$MAKECONF" "MAKEOPTS" "-j$CONFIG_JOBS -l$((CONFIG_JOBS + 1))"
+
 }
 
 setup_stagefile() {
@@ -313,6 +314,10 @@ setup_chroot() {
 
 default_personal_fn() {
     local SRC="$HOME/.local/src"
+
+    lycfg() {
+        sudo sed -i "s|^#*[[:space:]]*$1[[:space:]]*=.*|$1 = $2|" /etc/ly/config.ini
+    }
  
     # $1 name
     mci_this() {
@@ -364,7 +369,6 @@ default_personal_fn() {
     wget "https://gratisography.com/wp-content/uploads/2023/04/gratisography-heavenly-sky-free-stock-photo-1170x775.jpg" -O ~/wallpaper.jpg
     sudo emerge --sync
  
-    sudo mkdir -p /etc/portage/package.use
     echo "*/* elogind" | sudo tee /etc/portage/package.use/00elogind
     printf '%s\n' \
         '*/* pipewire' \
@@ -384,7 +388,8 @@ default_personal_fn() {
         sys-auth/elogind sys-apps/dbus \
         media-video/pipewire media-video/wireplumber media-libs/libpulse \
         dev-vcs/git dev-build/make dev-build/autoconf dev-build/automake \
-        dev-build/libtool dev-util/pkgconf sys-libs/pam sys-power/acpilight
+        dev-build/libtool dev-util/pkgconf sys-libs/pam sys-power/acpilight \
+        dev-lang/zig-bin x11-apps/xauth
     sudo rc-update add elogind boot
     sudo rc-update add dbus default
     sudo rc-service dbus start
@@ -464,6 +469,24 @@ slstatus &
 exec dwm
 EOF
     chmod +x "$HOME/.xinitrc"
+
+    git clone https://codeberg.org/fairyglade/ly.git
+    ( cd "$SRC/ly" || exit 1
+      sudo zig build installexe -Dinit_system=openrc )
+
+    sudo rc-update add ly default
+    sudo rc-update del agetty.tty2 2>/dev/null
+    sudo sed -i '/^[^#].*tty2/s/^/#/' /etc/inittab
+
+    sudo wget -q -O /etc/ly/blackhole-smooth-240x67.dur \
+      "https://codeberg.org/fairyglade/ly-community/raw/branch/main/animations/dur/blackhole-smooth-240x67.dur"
+
+    lycfg animation            dur_file
+    lycfg dur_file_path        '$CONFIG_DIRECTORY/ly/blackhole-smooth-240x67.dur'
+    lycfg dur_offset_alignment center
+    lycfg full_color           true
+
+    ly --validate-config /etc/ly/config.ini
 }
 
 # Because config.sh is sourced, it should be fine to just write something and set CONFIG_PERSONAL_FUNCTION
@@ -489,7 +512,20 @@ chroot_work() {
     set -e
     try emerge-webrsync
     try emerge --oneshot app-portage/cpuid2cpuflags
+    mkdir -p /etc/portage/package.use
     echo "*/* $(cpuid2cpuflags)" > /etc/portage/package.use/00cpu-flags
+    echo "*/* VIDEO_CARDS: -* $CONFIG_VIDEO_CARDS" > /etc/portage/package.use/00video_cards
+
+    if grep -qw nvidia <<< "$CONFIG_VIDEO_CARDS"; then
+        f=/etc/portage/package.use/00-dist-kernel
+        mkdir -p "$(dirname "$f")"
+        cat > /etc/portage/package.use/00-dist-kernel << 'EOF'
+sys-kernel/gentoo-kernel-bin dist-kernel
+x11-drivers/nvidia-drivers dist-kernel
+EOF
+    fi
+
+
 
     if [[ -d "/usr/share/zoneinfo" ]]; then
         ln -sf "../../usr/share/zoneinfo/$CONFIG_TIMEZONE" /etc/localtime
@@ -665,6 +701,153 @@ load_config() {
     else
         checks CONFIG_JOBS $MAX_JOBS_BY_RAM
     fi
+
+    checks CONFIG_VIDEO_CARD "$(map_gpu_driver $(find_gpu))"
+
+}
+
+#   nvidia            NVIDIA Maxwell (GM1xx) and newer
+#   nvidia_other      NVIDIA Kepler and older
+#   amd               AMD GCN2 / Sea Islands (CIK) and newer  -> amdgpu
+#   ati_amd_other     AMD Southern Islands and older, all ATI -> radeon
+#   intel             Intel Ironlake (Gen5) and newer
+#   intel_other       Intel Gen1-Gen3.5 (i810 .. Pineview)
+#   virtual           QEMU/KVM (and other hypervisor) display devices
+find_gpu() {
+    # https://pci-ids.ucw.cz/
+    local ID_NVIDIA="0x10de"
+    local ID_AMD="0x1002"
+    local ID_INTEL="0x8086"
+    local ID_VIRTUAL="0x1234;0x1013;0x1af4;0x1b36;0x15ad;0x1414"
+    local NVIDIA_MAXWELL_MIN=0x1340
+    local AMD_GCN2_PLUS="\
+1304-131d;150e-1517;15bf-15c8;15d8-15dd;15e7;1636-164e;1681;\
+6640-665f;6860-687f;66a0-66af;6920-6939;67a0-67bf;67c0-67ff;\
+6980-699f;7300-730f;7310-73ff;7400-747f;7550-756f;\
+9830-983d;9850-9877;98e4"
+    local INTEL_LEGACY="\
+7121;7123;7125;1132;3577;2562;3582;2572;\
+2582;2592;2772;27a2;27ae;2972;2982;2992;29a2;29b2;29c2;29d2;\
+2a02;2a12;2a42;2e02;2e12;2e22;2e32;2e42;2e92;a001;a011"
+ 
+    _in_set() {
+        local n=$((0x$1)) item lo hi
+        local IFS=';'
+        for item in $2; do
+            [ -z "$item" ] && continue
+            case $item in
+                *-*) lo=$((0x${item%%-*})); hi=$((0x${item##*-})) ;;
+                *)   lo=$((0x$item));       hi=$lo ;;
+            esac
+            [ "$n" -ge "$lo" ] && [ "$n" -le "$hi" ] && return 0
+        done
+        return 1
+    }
+ 
+    local found=""
+    local dev vendor device class drv tier
+ 
+    local dmi=/sys/class/dmi/id/sys_vendor
+    if [ -r "$dmi" ]; then
+        case "$(< "$dmi")" in
+            QEMU|"Red Hat"*|"KVM"*) found="virtual" ;;
+        esac
+    fi
+ 
+    for dev in /sys/bus/pci/devices/*/; do
+        [ -r "$dev/class" ] || continue
+        class=$(< "$dev/class")
+        # 0x0300 VGA 0x0302 3D controller 0x0380 other display
+        case $class in
+            0x0300*|0x0302*|0x0380*) ;;
+            *) continue ;;
+        esac
+ 
+        vendor=$(< "$dev/vendor")
+        device=$(< "$dev/device")
+        vendor=${vendor,,}
+        device=${device,,}
+        tier=""
+ 
+        case $vendor in
+            "$ID_NVIDIA")
+                if [ $((device)) -ge $((NVIDIA_MAXWELL_MIN)) ]; then
+                    tier=nvidia
+                else
+                    tier=nvidia_other
+                fi
+                ;;
+            "$ID_AMD")
+                drv=""
+                [ -L "$dev/driver" ] && drv=$(basename "$(readlink -f "$dev/driver")")
+                case $drv in
+                    amdgpu) tier=amd ;;
+                    radeon) tier=ati_amd_other ;;
+                    *)  if _in_set "${device#0x}" "$AMD_GCN2_PLUS"; then
+                            tier=amd
+                        else
+                            tier=ati_amd_other
+                        fi ;;
+                esac
+                ;;
+            "$ID_INTEL")
+                if _in_set "${device#0x}" "$INTEL_LEGACY"; then
+                    tier=intel_other
+                else
+                    tier=intel
+                fi
+                ;;
+            *)
+                _in_set "${vendor#0x}" "${ID_VIRTUAL//0x/}" && tier=virtual
+                ;;
+        esac
+ 
+        [ -n "$tier" ] && case " $found " in
+            *" $tier "*) ;;
+            *) found="${found:+$found }$tier" ;;
+        esac
+    done
+ 
+    unset -f _in_set
+    [ -z "$found" ] && return 1
+    printf '%s\n' $found
+    return 0
+}
+
+
+map_gpu_driver() {
+    local tokens
+    if [ "$#" -gt 0 ]; then
+        tokens="$*"
+    else
+        tokens="$(cat)"
+    fi
+ 
+    local out="" tok drv
+    for tok in $tokens; do
+        case $tok in
+            nvidia)        drv="nvidia nouveau" ;;
+            nvidia_other)  drv="nouveau" ;;
+            amd)           drv="amdgpu radeonsi" ;;
+            ati_amd_other) drv="radeon" ;;
+            intel)         drv="intel" ;;
+            intel_other)   drv="intel i915" ;;
+            virtual)       drv="virgl" ;;
+            *)             continue ;;
+        esac
+ 
+        local d
+        for d in $drv; do
+            case " $out " in
+                *" $d "*) ;;
+                *) out="${out:+$out }$d" ;;
+            esac
+        done
+    done
+ 
+    [ -z "$out" ] && return 1
+    printf '%s\n' $out
+    return 0
 }
 
 system_checks() {
